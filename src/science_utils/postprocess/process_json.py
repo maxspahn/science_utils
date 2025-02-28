@@ -1,3 +1,4 @@
+import sys
 from typing import Literal, Optional, Dict, List, Union
 import json
 import matplotlib.pyplot as plt
@@ -5,6 +6,7 @@ import matplotlib
 from matplotlib.offsetbox import OffsetImage, AnnotationBbox
 from matplotlib.axes import Axes
 import numpy as np
+import logging
 
 import argparse
 
@@ -24,9 +26,40 @@ plt.rcParams.update({
     "font.sans-serif": "Helvetica",
 })
 
+def valid_log_level(level):
+    try:
+        return int(getattr(logging, level))
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"Invalid log level: {level}")
+
+class CustomFormatter(logging.Formatter):
+
+    grey = "\x1b[38;20m"
+    yellow = "\x1b[33;20m"
+    red = "\x1b[31;20m"
+    blue = "\x1b[34;20m" 
+    bold_red = "\x1b[31;1m"
+    reset = "\x1b[0m"
+    format_full = "%(name)s - %(levelname)s - %(message)s (%(filename)s:%(lineno)d)"
+    format_light = "%(name)s - %(levelname)s - %(message)s (%(filename)s)"
+
+    FORMATS = {
+        logging.DEBUG: grey + format_full + reset,
+        logging.INFO: blue + format_light + reset,
+        logging.WARNING: yellow + format_full + reset,
+        logging.ERROR: red + format_full + reset,
+        logging.CRITICAL: bold_red + format_full + reset
+    }
+
+    def format(self, record):
+        log_fmt = self.FORMATS.get(record.levelno)
+        formatter = logging.Formatter(log_fmt)
+        return formatter.format(record)
 
 
-class PlottingImprovements():
+
+
+class BenchPlotter():
     _raw_data: dict
     _data_array: np.ndarray
     _metrics: list
@@ -38,6 +71,14 @@ class PlottingImprovements():
     _relative_black_list: List[str]
     _parser: argparse.ArgumentParser
     _ignore_lists: Dict[str, List[str]] = {}
+    _logger: logging.Logger
+
+    def init_logger(self) -> None:
+        self._logger = logging.getLogger(self.__class__.__name__)
+        stdout = logging.StreamHandler()
+        stdout.setFormatter(CustomFormatter())
+        self._logger.addHandler(stdout)
+        self._logger.setLevel(self._args.log_level)
 
     def __init__(self):
         self._relative_black_list = ['path_targets', 'num_short_segments']
@@ -49,13 +90,11 @@ class PlottingImprovements():
         self.read_data()
         self.process_data()
         if not self._args.info:
-            '''
-            for metric in self._metrics:
-                self.plot_metric_accros_problems(metric)
-            '''
             if self._args.problem:
                 self.plot(self._args.problem)
             else:
+                for metric in self._metrics:
+                    self.plot_metric_accros_problems(metric)
                 for problem in self._problems:
                     self.plot(problem)
         else:
@@ -75,10 +114,15 @@ class PlottingImprovements():
         self._parser.add_argument('--output', '-o', help="Toggle to save to png.", required=False, default=False, action='store_true')
         self._parser.add_argument('--show', '-s', help="Should the plot be shown.", required=False, default=False, action='store_true')
         self._parser.add_argument('--with-image', '-wi', help="Should the image be shown in the figure", required=False, default=False, action="store_true")
+        self._parser.add_argument('--log-level', type=valid_log_level, default='INFO',
+                    help='Set the logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)')
         self._args = self._parser.parse_args()
+        self.init_logger()
         self._filename = self._args.foldername + "/data.json"
         self._ignore_lists['method'] = self._args.ignore_method
         self._ignore_lists['problem'] = self._args.ignore_problem
+        self._logger.warning(f"Ignoring methods {self._ignore_lists['method']} upon request")
+        self._logger.warning(f"Ignoring problems {self._ignore_lists['problem']} upon request")
 
     def insert_png(self, axes: Axes, problem_name, position, size):
         image_path = f"{self._args.foldername}/{problem_name}.png"
@@ -153,7 +197,7 @@ class PlottingImprovements():
         for metric in self._relative_black_list:
             new_metrics.append(metric)
         self._metrics = new_metrics
-        self.n_cases = len(self._raw_data[self._problems[0]][self._methods[0]][self._metrics[0]])
+        self.n_cases = max([len(self._raw_data[p][self._methods[0]][self._metrics[0]]) for p in self._problems])
         self.n_repetitions = len(self._raw_data[self._problems[0]][self._methods[0]][self._metrics[0]][0])
         self.create_index_map()
 
@@ -206,7 +250,9 @@ class PlottingImprovements():
             for method_i, method in enumerate(problem.values()):
                 self._indexmap['metric'] = dict((metric_name, i) for i, metric_name in enumerate(method.keys()))
                 for metric_i, metric in enumerate(method.values()):
-                    self._data_array[problem_i, method_i, metric_i, :, :] = np.array(metric)
+                    values = np.array(metric, dtype=float)
+                    pad_values = np.pad(values, ((0, int(self.n_cases - values.shape[0])), (0, 0)), constant_values=np.nan)
+                    self._data_array[problem_i, method_i, metric_i, :, :] = pad_values
 
     def index(self, fieldtype, fieldvalue) -> int:
         if fieldvalue is None:
@@ -226,7 +272,7 @@ class PlottingImprovements():
 
         return [self.index(fieldtype, value) for value in filtered_values]
 
-    def get_data_array(self, indices: List[Union[List[int], None, int]]) -> np.ndarray:
+    def get_data_array(self, indices: List[Union[List[int], None, int]], nan: Optional[str] = None) -> np.ndarray:
         idx = []
         for i, index in enumerate(indices):
             if index is None:
@@ -235,15 +281,24 @@ class PlottingImprovements():
                 idx.append([index])
             elif isinstance(index, list):
                 idx.append(index)
-        return self._data_array[np.ix_(
+        res = self._data_array[np.ix_(
             idx[0],
             idx[1],
             idx[2],
             idx[3],
             idx[4],
         )]
+        if nan == 'zero':
+            return np.nan_to_num(res, copy=True, nan=0.0)
+        elif nan == 'filter':
+            new_shape = list(res.shape)
+            new_shape[3] = -1
+            return np.reshape(res[np.logical_not(np.isnan(res))], tuple(new_shape))
+
+        return res
 
     def plot_metric_accros_problems(self, metric: str):
+        self._logger.info(f"Creating summary plot for metric {metric}")
         fig, axis = plt.subplots()
         fig.set_size_inches(6, 6)
         reference_method = self._args.compare_to
@@ -255,7 +310,7 @@ class PlottingImprovements():
             self.index('metric', metric),
             None,
             None,
-        ])
+        ], nan='zero')
         data_metric = np.sum(
             np.reshape(
                 raw_data,
@@ -270,7 +325,7 @@ class PlottingImprovements():
                 self.index('metric', metric),
                 None,
                 None,
-            ])
+            ], nan='zero')
             data_metric_reference = np.sum(
                 np.reshape(
                     raw_data_reference,
@@ -292,11 +347,12 @@ class PlottingImprovements():
     def create_barplot(self, axes: Axes, data: np.ndarray, metric: str):
         problem_indices = self.indices('problem')
         method_indices = self.indices('method')
+        methods_names = self.methods_names(method_indices)
         x_positions = np.arange(0, len(problem_indices))
         width = 0.9/self.nb_methods
         for method_i, method_index in enumerate(method_indices):
             method_i_positions = x_positions + method_i * width
-            axes.bar(method_i_positions, data[method_i, :], width, label=f"{self.methods_names[method_index]}")
+            axes.bar(method_i_positions, data[method_i, :], width, label=f"{methods_names[method_i]}")
         axes.set_ylabel(f'{metric}')
         axes.set_title(f'{metric} by problem and method')
         axes.set_xticks(x_positions + (len(method_indices) - 1) / 2 * width)
@@ -316,8 +372,9 @@ class PlottingImprovements():
         
 
     def plot(self, problem: Optional[str] = None):
+        self._logger.info(f"Plotting for problem {problem}")
         fig, axs = plt.subplots(1, self.nb_metrics)
-        fig.set_size_inches((6 * self.nb_metrics, 6))
+        fig.set_size_inches((3 * self.nb_metrics, 6))
         reference_method = self._args.compare_to
         max_value = 1.0
         min_value = 1e5
@@ -331,7 +388,7 @@ class PlottingImprovements():
                 self.index('metric', metric),
                 None,
                 None,
-            ])
+            ], nan='filter')
             data_metric = np.reshape(
                 raw_data,
                 (len(method_indices), -1),
@@ -343,14 +400,17 @@ class PlottingImprovements():
                     self.index('metric', metric),
                     None,
                     None,
-                ])
+                ], nan='filter')
                 data_metric_reference = np.reshape(
                     raw_data_reference,
                     (1, -1),
                 ).T
-                one_value = data_metric[17, 0]/data_metric_reference[17]
+                if np.any(data_metric_reference == 0):
+                    self._logger.error(
+                        f"Zeros in reference method for metric {metric} in problem {problem}: Skipping plotting"
+                    )
+                    return
                 relative_change = data_metric / data_metric_reference
-                assert one_value == relative_change[17, 0]
                 self.create_statistics_plot(axs[metric_i], relative_change)
                 axs[metric_i].plot([0.5, len(method_indices)+0.5], [1.05, 1.05], 'r.-.')
                 axs[metric_i].plot([0.5, len(method_indices)+0.5], [0.95, 0.95], 'g.-.')
@@ -363,7 +423,7 @@ class PlottingImprovements():
 
 
             method_names = self.methods_names(method_indices)
-            axs[metric_i].set_xticks(list(range(1, len(method_names)+1)), method_names, fontsize=18)
+            axs[metric_i].set_xticks(list(range(1, len(method_names)+1)), method_names, fontsize=18, rotation=90)
             axs[metric_i].set_title(f"{metric}")
         fig.suptitle(f"{problem}")
         if reference_method:
@@ -384,7 +444,7 @@ class PlottingImprovements():
             plt.show()
 
 def main():
-    PlottingImprovements()
+    BenchPlotter()
 
 
 
