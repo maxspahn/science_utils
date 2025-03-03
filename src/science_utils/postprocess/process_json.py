@@ -96,6 +96,9 @@ class BenchPlotter():
                 for metric in self._metrics:
                     self.plot_metric_accros_problems(metric)
                 for problem in self._problems:
+                    if problem in self._ignore_lists['problem']:
+                        self._logger.warning(f"Ignoring problem {problem} because it is on the black list.")
+                        continue
                     self.plot(problem)
         else:
             self.get_info()
@@ -360,7 +363,7 @@ class BenchPlotter():
         axes.set_xticklabels(problem_names, rotation=45, fontsize=16, ha="right")
         axes.legend(loc = 'lower left')
         max_value = np.max(data)
-        max_value = 1.30
+        max_value = 1.50
         min_value = np.min(data)
         min_value = 0.1
         offset = 1/100 * (max_value - min_value)
