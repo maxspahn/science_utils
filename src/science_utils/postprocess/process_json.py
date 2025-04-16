@@ -10,7 +10,7 @@ import logging
 
 import argparse
 
-from science_utils.colors.catppuccin import get_color
+from science_utils.colors.catppuccin import get_color, get_color_by_index
 
 
 matplotlib.use('tkagg')
@@ -61,8 +61,12 @@ class BenchmarkData():
     _problem_names: List[str]
     _method_names: Dict[str, str]
     _metric_names: Dict[str, Dict[str, str]]
-    def __init__(self, filename: str):
+    _problem_colors: list
+    _logger: logging.Logger
+
+    def __init__(self, filename: str, logger: logging.Logger):
         self._filename = filename
+        self._logger = logger
         with open(self._filename, 'r') as f:
             self._raw_data = json.load(f)
         self._problem_names = list(self._raw_data.keys())
@@ -71,6 +75,7 @@ class BenchmarkData():
 
         for problem_name in self._problem_names:
             self._method_names[problem_name] = list(self._raw_data[problem_name].keys())
+        self._problem_colors = [get_color_by_index('latte', 2 * i) for i in range(len(self._problem_names))]
         for problem_name in self._problem_names:
             self._metric_names[problem_name] = {}
             for method_name in self._method_names[problem_name]:
@@ -104,7 +109,7 @@ class BenchmarkData():
             problem_names: Union[str, List[str]] = 'all',
             method_names: Union[str, List[str]] = 'all',
             metric_names: Union[str, List[str]] = 'all',
-            average: Union[str, None] = None,
+            post_processing: Optional[Tuple[str, str]] = None,
         ) -> Tuple[List[np.ndarray], List]:
         """get data as numpy array"""
         if problem_names == 'all':
@@ -143,14 +148,33 @@ class BenchmarkData():
                 problem_failures.append(method_failures)
             result.append(problem_result)
             failures.append(problem_failures)
-        if average == 'method':
-            averages = []
-            for p_i in range(len(result)):
-                p_data = []
-                for m_j in range(len(result[p_i])):
-                    p_data.append(np.mean(np.array(result[p_i][m_j]), axis=0))
-                averages.append(np.array(p_data))
-            result = averages
+        if post_processing:
+            if post_processing[0] == 'method' and post_processing[1] in ['average', 'mean']:
+                averages = []
+                for p_i in range(len(result)):
+                    p_data = []
+                    for m_j in range(len(result[p_i])):
+                        p_data.append(np.mean(np.array(result[p_i][m_j]), axis=0))
+                    averages.append(np.array(p_data))
+                result = averages
+            elif post_processing[0] == 'method' and post_processing[1] in ['median']:
+                averages = []
+                for p_i in range(len(result)):
+                    p_data = []
+                    for m_j in range(len(result[p_i])):
+                        p_data.append(np.median(np.array(result[p_i][m_j]), axis=0))
+                    averages.append(np.array(p_data))
+                result = averages
+            elif post_processing[0] == 'method' and post_processing[1] in ['sum']:
+                averages = []
+                for p_i in range(len(result)):
+                    p_data = []
+                    for m_j in range(len(result[p_i])):
+                        p_data.append(np.sum(np.array(result[p_i][m_j]), axis=0))
+                    averages.append(np.array(p_data))
+                result = averages
+            else:
+                self._logger.warning(f"Post processing {post_processing} not supported")
 
         return result, failures
 
@@ -238,6 +262,7 @@ class BenchPlotter():
             if self._args.problem:
                 self.plot(self._args.problem)
             else:
+                self.plot_planning_time_over_path_length()
                 for metric_name in self._benchmark_data.common_metrics():
                     self.plot_metric_accros_problems(metric_name)
                 for problem in self._benchmark_data.common_problems():
@@ -363,7 +388,7 @@ class BenchPlotter():
 
 
     def read_data(self) -> None:
-        self._benchmark_data = BenchmarkData(self._filename)
+        self._benchmark_data = BenchmarkData(self._filename, self._logger)
 
 
     def index(self, fieldtype, fieldvalue) -> int:
@@ -394,14 +419,14 @@ class BenchPlotter():
                 problem_names = 'all',
                 method_names = method_names,
                 metric_names = [metric],
-                average = 'method',
+                post_processing = ('method', 'average'),
         )
         if reference_method is not None:
             raw_data_reference, _ = self._benchmark_data.get_data_array(
                 problem_names = 'all',
                 method_names = [reference_method],
                 metric_names = [metric],
-                average = 'method',
+                post_processing = ('method', 'average'),
             )
             relative_change = np.array(data) / np.array(raw_data_reference)
             self.create_barplot(axis, relative_change, metric)
@@ -413,6 +438,96 @@ class BenchPlotter():
             plt.savefig(f"{self._args.foldername}/{metric}_summary.png", dpi=500)
         if self._args.show:
             plt.show()
+
+    def plot_planning_time_over_path_length(self):
+        self._logger.info(f"Creating summary plot planning time over path length")
+        fig, axis = plt.subplots()
+        fig.set_size_inches(8, 6)
+        problem_names = self._benchmark_data.common_problems()
+        reference_method = self._args.compare_to
+        method_names = self._benchmark_data.common_methods()
+        method_names = [m for m in method_names if m not in self._ignore_lists['method']]
+        method_names = [m for m in method_names if not m == reference_method]
+        data_planning_time, _ = self._benchmark_data.get_data_array(
+                problem_names = 'all',
+                method_names = method_names,
+                metric_names = ["planning_time"],
+                post_processing = ('method', 'median'),
+        )
+        data_path_length, _ = self._benchmark_data.get_data_array(
+                problem_names = 'all',
+                method_names = method_names,
+                metric_names = ["path_length"],
+                post_processing = ('method', 'sum'),
+        )
+        data_path_length_reference_method, _ = self._benchmark_data.get_data_array(
+                problem_names = 'all',
+                method_names = [reference_method],
+                metric_names = ["path_length"],
+                post_processing = ('method', 'sum'),
+        )
+        data_planning_time_reference_method, _ = self._benchmark_data.get_data_array(
+                problem_names = 'all',
+                method_names = [reference_method],
+                metric_names = ["planning_time"],
+                post_processing = ('method', 'median'),
+        )
+        problem_colors = self._benchmark_data._problem_colors
+        for p_i in range(len(data_planning_time)):
+            for m_i in range(data_planning_time[p_i].size):
+                method_name = method_names[m_i]
+                planning_time = data_planning_time[p_i][m_i]
+                path_length = data_path_length[p_i][m_i]
+                reference_planning_time = data_planning_time_reference_method[p_i][0]
+                reference_path_length = data_path_length_reference_method[p_i][0]
+                if m_i == 0:
+                    label=problem_names[p_i]
+                else:
+                    label=None
+                axis.plot(
+                    path_length,
+                    planning_time,
+                    marker='o',
+                    color=problem_colors[p_i],
+                    label=label,
+                )
+                axis.plot(
+                    reference_path_length,
+                    reference_planning_time,
+                    color=problem_colors[p_i],
+                    marker='o',
+                )
+                axis.text(
+                    s=reference_method,
+                    x=reference_path_length + 0.1,
+                    y=reference_planning_time + 0.01,
+                    color=problem_colors[p_i],
+                    fontsize=9,
+                )
+                axis.text(
+                    s=method_name,
+                    x=path_length + 0.1,
+                    y=planning_time + 0.01,
+                    color=problem_colors[p_i],
+                    fontsize=9,
+                )
+                arrow_props = dict(arrowstyle="-|>", color=problem_colors[p_i], antialiased=True, linewidth=1)
+                plt.annotate(
+                    "",
+                    xytext=(path_length, planning_time),
+                    xy=(reference_path_length, reference_planning_time),
+                    arrowprops=arrow_props
+                )
+        axis.legend()
+        axis.set_xlabel("Sum Path length [m]")
+        axis.set_ylabel("Median Planning time [s]")
+
+
+        if self._args.output:
+            plt.savefig(f"{self._args.foldername}/planning_time_over_path_length.png", dpi=500)
+        if self._args.show:
+            plt.show()
+
 
     def create_barplot(self, axes: Axes, data: np.ndarray, metric: str, failures: Optional[List[int]] = None):
         problem_names = self._benchmark_data.common_problems()
@@ -490,9 +605,9 @@ class BenchPlotter():
                     problem_names = [problem],
                     method_names = [reference_method],
                     metric_names = [metric],
-                )[0]
+                )
                 if len(method_names) > 1:
-                    raw_data_reference = raw_data_reference[0]
+                    raw_data_reference = raw_data_reference[0][0]
                 data_metric_reference = np.array(raw_data_reference)
                 if np.any(data_metric_reference == 0):
                     self._logger.error(
@@ -505,14 +620,11 @@ class BenchPlotter():
                             f"Data shape mismatch for method {method_names[i]} in problem {problem}"
                         )
                         return
-                relative_change =  data / data_metric_reference
-                relative_change = [d.tolist() for d in relative_change]
+                relative_change =  np.array(data) / data_metric_reference
+                relative_change = [d for d in relative_change]
                 self.create_statistics_plot(axs[metric_i], relative_change)
             else:
-                if metric == 'success':
-                    self.create_success_plot(axs[metric_i], data)
-                else:
-                    self.create_statistics_plot(axs[metric_i], data)
+                self.create_statistics_plot(axs[metric_i], data)
 
 
             axs[metric_i].set_xticks(list(range(1, len(method_names)+1)), method_names, fontsize=18, rotation=90)
