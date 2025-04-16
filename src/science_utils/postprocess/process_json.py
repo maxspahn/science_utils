@@ -1,5 +1,5 @@
 import sys
-from typing import Literal, Optional, Dict, List, Union
+from typing import Literal, Optional, Dict, List, Tuple, Union
 import json
 import matplotlib.pyplot as plt
 import matplotlib
@@ -57,6 +57,147 @@ class CustomFormatter(logging.Formatter):
         return formatter.format(record)
 
 
+class BenchmarkData():
+    _problem_names: List[str]
+    _method_names: Dict[str, str]
+    _metric_names: Dict[str, Dict[str, str]]
+    def __init__(self, filename: str):
+        self._filename = filename
+        with open(self._filename, 'r') as f:
+            self._raw_data = json.load(f)
+        self._problem_names = list(self._raw_data.keys())
+        self._method_names = {}
+        self._metric_names = {}
+
+        for problem_name in self._problem_names:
+            self._method_names[problem_name] = list(self._raw_data[problem_name].keys())
+        for problem_name in self._problem_names:
+            self._metric_names[problem_name] = {}
+            for method_name in self._method_names[problem_name]:
+                self._metric_names[problem_name][method_name] = list(self._raw_data[problem_name][method_name].keys())
+
+
+        self._nb_problems = len(self._problem_names)
+        self._nb_methods = [len(self._method_names[problem_name]) for problem_name in self._problem_names]
+        self._nb_metrics = [
+            [
+                len(mp[method_name]) for method_name in self._method_names[problem_name]
+            ] for problem_name, mp in self._metric_names.items()
+        ]
+        self._nb_queries = {
+                problem_name:
+                    len(list(list(self._raw_data[problem_name].values())[0].values())[0][0]) for problem_name in self._problem_names}
+        self._nb_repetitions = {
+                problem_name:
+                    len(list(list(self._raw_data[problem_name].values())[0].values())[0]) for problem_name in self._problem_names}
+
+    def get_data(self, problem_name: str | None = None, method_name: str | None = None, metric_name: str | None = None) -> list:
+        if problem_name is None:
+            return self._raw_data
+        if method_name is None:
+            return self._raw_data[problem_name]
+        if metric_name is None:
+            return self._raw_data[problem_name][method_name]
+        return self._raw_data[problem_name][method_name][metric_name]
+
+    def get_data_array(self, 
+            problem_names: Union[str, List[str]] = 'all',
+            method_names: Union[str, List[str]] = 'all',
+            metric_names: Union[str, List[str]] = 'all',
+            average: Union[str, None] = None,
+        ) -> Tuple[List[np.ndarray], List]:
+        """get data as numpy array"""
+        if problem_names == 'all':
+            problem_names = self._problem_names
+        if method_names == 'all':
+            method_names = self.common_methods(problem_names)
+        if metric_names == 'all':
+            metric_names = self.common_metrics(problem_names, method_names)
+
+        result = []
+        failures = []
+        for problem in problem_names:
+            problem_result = []
+            problem_failures = []
+            for method in method_names:
+                method_result = []
+                method_failures = []
+                for metric in metric_names:
+                    data = []
+                    failures_temp = 0
+                    for i in range(self._nb_repetitions[problem]):
+                        assert self._nb_queries[problem] == len(self._raw_data[problem][method][metric][i]), f"Missing queries for problem {problem} method {method} {len(self._raw_data[problem][method][metric][i])} != {self._nb_queries[problem]}"
+                        for j in range(self._nb_queries[problem]):
+                            if self._raw_data[problem][method][metric][i][j] is None:
+                                failures_temp += 1
+                                continue
+                            else:
+                                data.append(float(self._raw_data[problem][method][metric][i][j]))
+                    if len(metric_names) == 1:
+                        method_result = data
+                        method_failures = failures_temp
+                    else:
+                        method_result.append(data)
+                        method_failures.append(failures_temp)
+                problem_result.append(method_result)
+                problem_failures.append(method_failures)
+            result.append(problem_result)
+            failures.append(problem_failures)
+        if average == 'method':
+            averages = []
+            for p_i in range(len(result)):
+                p_data = []
+                for m_j in range(len(result[p_i])):
+                    p_data.append(np.mean(np.array(result[p_i][m_j]), axis=0))
+                averages.append(np.array(p_data))
+            result = averages
+
+        return result, failures
+
+    def common_problems(self) -> List[str]:
+        return self._problem_names
+
+
+    def common_metrics(self,
+            problem_names: Union[str, List[str]] = 'all',
+            method_names: Union[str, List[str]] = 'all',
+        ) -> List[str]:
+        """check which metrics are present in every self._metric_names"""
+        if problem_names == 'all':
+            problem_names = self._problem_names
+        if method_names == 'all':
+            method_names = self.common_methods(problem_names=problem_names)
+        common_metrics = []
+        metrics = [self._metric_names[problem_name][method_name] for problem_name in problem_names for method_name in method_names]
+        common_metrics = list(set.intersection(*[set(m) for m in metrics]))
+        return common_metrics
+
+    def common_methods(self,
+            problem_names: Union[str, List[str]] = 'all',
+        ) -> List[str]:
+        """check which methods are present in every self._method_names"""
+        if problem_names == 'all':
+            problem_names = self._problem_names
+        common_methods = []
+        methods = [self._method_names[problem_name] for problem_name in problem_names]
+        common_methods = list(set.intersection(*[set(m) for m in methods]))
+        return common_methods
+
+    def get_info(self) -> str:
+        info = f"Number of problems: {self._nb_problems}\n"
+        info += f"Number of methods: {self._nb_methods}\n"
+        info += f"Number of metrics: {self._nb_metrics}\n"
+        info += f"Number of queries: {self._nb_queries}\n"
+        info += f"Number of repetitions: {self._nb_repetitions}\n"
+        info += f"Problems: {self._problem_names}\n"
+        return info
+
+
+
+
+
+
+
 
 
 class BenchPlotter():
@@ -72,6 +213,11 @@ class BenchPlotter():
     _parser: argparse.ArgumentParser
     _ignore_lists: Dict[str, List[str]] = {}
     _logger: logging.Logger
+    _error_map: Dict[int, str] = {
+        1: "Success",
+        -2: "Collision",
+        99999: "UnknownError"
+    }
 
     def init_logger(self) -> None:
         self._logger = logging.getLogger(self.__class__.__name__)
@@ -81,21 +227,20 @@ class BenchPlotter():
         self._logger.setLevel(self._args.log_level)
 
     def __init__(self):
-        self._relative_black_list = ['path_targets', 'num_short_segments']
+        self._relative_black_list = ['path_targets', 'num_short_segments', 'success']
         self._methods = []
         self._ignore_lists['method'] = []
         self._ignore_lists['problem'] = []
         self._ignore_lists['metric'] = []
         self.init_parser()
         self.read_data()
-        self.process_data()
         if not self._args.info:
             if self._args.problem:
                 self.plot(self._args.problem)
             else:
-                for metric in self._metrics:
-                    self.plot_metric_accros_problems(metric)
-                for problem in self._problems:
+                for metric_name in self._benchmark_data.common_metrics():
+                    self.plot_metric_accros_problems(metric_name)
+                for problem in self._benchmark_data.common_problems():
                     if problem in self._ignore_lists['problem']:
                         self._logger.warning(f"Ignoring problem {problem} because it is on the black list.")
                         continue
@@ -112,6 +257,7 @@ class BenchPlotter():
         self._parser.add_argument('--compare_to', '-ct', help="Method to compare to.", required=False, default=None)
         self._parser.add_argument('--ignore-method', '-im', help="Methods to ignore.", required=False, default=[], type=str, nargs="+")
         self._parser.add_argument('--ignore-problem', '-ip', help="Problems to ignore.", required=False, default=[], type=str, nargs="+")
+        self._parser.add_argument('--ignore-metric', '-ime', help="Metrics to be ignored", required=False, default=[], type=str, nargs="+")
         self._parser.add_argument('--problem', '-p', help="Problem to evaluate.", required=False, default=None)
         self._parser.add_argument('--info', '-i', help="Gets info on data file.", required=False, action='store_true')
         self._parser.add_argument('--output', '-o', help="Toggle to save to png.", required=False, default=False, action='store_true')
@@ -124,8 +270,10 @@ class BenchPlotter():
         self._filename = self._args.foldername + "/data.json"
         self._ignore_lists['method'] = self._args.ignore_method
         self._ignore_lists['problem'] = self._args.ignore_problem
+        self._ignore_lists['metric'] = self._args.ignore_metric
         self._logger.warning(f"Ignoring methods {self._ignore_lists['method']} upon request")
         self._logger.warning(f"Ignoring problems {self._ignore_lists['problem']} upon request")
+        self._logger.warning(f"Ignoring metrics {self._ignore_lists['metric']} upon request")
 
     def insert_png(self, axes: Axes, problem_name, position, size):
         image_path = f"{self._args.foldername}/{problem_name}.png"
@@ -147,18 +295,33 @@ class BenchPlotter():
     def create_statistics_plot(
         self,
         axes: Axes,
-        data: np.ndarray,
+        data: List[np.ndarray],
         plot_type : Literal['boxplot', 'violinplot'] = 'violinplot'
     ) -> None:
+        #cleaned_data = [np.array(d)[~np.isnan(d)] for d in data.T]
+        cleaned_data = data
+        max_data_points = max([d.size for d in cleaned_data])
         if plot_type == 'violinplot':
             plot_pointer = axes.violinplot(
-                data,
+                cleaned_data,
                 showmeans=True,
                 showmedians=False,
                 showextrema=True,
             )
             for i, body in enumerate(plot_pointer['bodies']):
-                color = get_color('latte', 'peach')
+                if cleaned_data[i].size < max_data_points:
+                    color = get_color('latte', 'red')
+                else:
+                    color = get_color('latte', 'green')
+                axes.text(
+                    i + 1,
+                    np.max(cleaned_data[i]),
+                    f"{len(cleaned_data[i])}/{max_data_points}",
+                    horizontalalignment='center',
+                    verticalalignment='bottom',
+                    fontsize=11,
+                    color=color,
+                )
                 body.set_color(color)
                 body.set_edgecolor(color)
             for part in ('cbars', 'cmins', 'cmaxes', 'cmeans', 'cmedians'):
@@ -168,94 +331,40 @@ class BenchPlotter():
                 plot_pointer[part].set_linewidth(1)
         elif plot_type == 'boxplot':
             plot_pointer = axes.boxplot(
-                data,
+                cleaned_data,
                 showmeans=True,
             )
+
+    def create_success_plot(
+        self,
+        axes: Axes,
+        data: np.ndarray,
+    ) -> None:
+        cleaned_data = np.array(data, dtype=int)
+        unique_flags = np.unique(cleaned_data)
+        counts = np.array([np.sum(cleaned_data == flag, axis=0) for flag in unique_flags])
+        methods_id = np.arange(self.nb_methods)
+        bottom = np.zeros(self.nb_methods)
+        N = unique_flags.shape[0]
+        for e in range(N):
+            axes.bar(
+                methods_id+1,
+                counts[e, :],
+                bottom=bottom,
+                label=f"{self._error_map[unique_flags[e]]}"
+            )
+            bottom += counts[e, :]
+        axes.legend()
 
 
 
     def get_info(self) -> None:
-        print(f"There are {self.nb_problems} problems with {self.nb_methods} methods and {self.nb_metrics} metrics.")
-        print(f"The cases have {self.n_cases} different cases and {self.n_repetitions} repetitions.\n")
-
-        print(f"Available Methods: {list(self._indexmap['method'].keys())}")
-        print(f"Available Problems: {list(self._indexmap['problem'].keys())}")
-        print(f"Available Metrics: {list(self._indexmap['metric'].keys())}")
+        print(self._benchmark_data.get_info())
 
 
+    def read_data(self) -> None:
+        self._benchmark_data = BenchmarkData(self._filename)
 
-    def read_data(self):
-        with open(self._filename, 'r') as f:
-            self._raw_data = json.load(f)
-        self._problems= list(self._raw_data.keys())
-        self._methods = list(self._raw_data[self._problems[0]].keys())
-        #self._methods = [m for m in list(self._raw_data[self._problems[0]].keys()) if m not in self._args.ignore_method]
-        self._metrics = list(self._raw_data[self._problems[0]][self._methods[0]].keys())
-        new_metrics = []
-        for metric in self._metrics:
-            if metric in self._relative_black_list:
-                continue
-            else:
-                new_metrics.append(metric)
-        for metric in self._relative_black_list:
-            new_metrics.append(metric)
-        self._metrics = new_metrics
-        self.n_cases = max([len(self._raw_data[p][self._methods[0]][self._metrics[0]]) for p in self._problems])
-        self.n_repetitions = len(self._raw_data[self._problems[0]][self._methods[0]][self._metrics[0]][0])
-        self.create_index_map()
-
-    def create_index_map(self):
-        self._indexmap = {}
-        self._indexmap['fields'] = {'metric' : 2, 'problem': 0, 'method': 1, 'case': 3, 'repetition': 4}
-
-    @property
-    def nb_metrics(self) -> int:
-        return len(self._metrics)
-
-    @property
-    def nb_methods(self) -> int:
-        return len(self._methods)
-
-    @property
-    def nb_problems(self) -> int:
-        return len(self._problems)
-
-    def methods_names(self, index_list: Optional[List[int]] = None) -> List[str]:
-        method_names = []
-        if index_list is None:
-            index_list = list(range(len(self._methods)))
-        for i in index_list:
-            method = self._methods[i]
-            method_names.append(method.replace('Reducer', ''))
-        return method_names
-
-    @property
-    def problem_names(self) -> List[str]:
-        problem_names = []
-        for problem in self._problems:
-            problem_names.append(problem)
-        return problem_names
-
-
-
-    def process_data(self) -> None:
-        #self._sorted_data = dict((metric, []) for metric in self._metrics)
-        self._data_array = np.empty((
-            self.nb_problems,
-            self.nb_methods,
-            self.nb_metrics,
-            self.n_cases,
-            self.n_repetitions,
-        ))
-        self._indexmap['problem'] = dict((problem_name, i) for i, problem_name in enumerate(self._raw_data.keys()))
-        for problem_i, problem in enumerate(self._raw_data.values()):
-            self._indexmap['method'] = dict((methods_name, i) for i, methods_name in enumerate(problem.keys()))
-            for method_i, method in enumerate(problem.values()):
-                self._indexmap['metric'] = dict((metric_name, i) for i, metric_name in enumerate(method.keys()))
-                for metric_i, metric in enumerate(method.values()):
-                    values = np.array(metric, dtype=float)
-                    pad_values = np.pad(values, ((0, int(self.n_cases - values.shape[0])), (0, 0)), constant_values=np.nan)
-                    self._data_array[problem_i, method_i, metric_i, :, :] = pad_values
 
     def index(self, fieldtype, fieldvalue) -> int:
         if fieldvalue is None:
@@ -269,77 +378,35 @@ class BenchPlotter():
     def ignored(self, fieldtype: str) -> List[str]:
         return self._ignore_lists[fieldtype]
 
-    def indices(self, fieldtype: str) -> List[int]:
-        values = self.__getattribute__(f"_{fieldtype}s")
-        filtered_values = [v for v in values if v not in self.ignored(fieldtype)]
 
-        return [self.index(fieldtype, value) for value in filtered_values]
-
-    def get_data_array(self, indices: List[Union[List[int], None, int]], nan: Optional[str] = None) -> np.ndarray:
-        idx = []
-        for i, index in enumerate(indices):
-            if index is None:
-                idx.append(list(range(self._data_array.shape[i])))
-            elif isinstance(index, int):
-                idx.append([index])
-            elif isinstance(index, list):
-                idx.append(index)
-        res = self._data_array[np.ix_(
-            idx[0],
-            idx[1],
-            idx[2],
-            idx[3],
-            idx[4],
-        )]
-        if nan == 'zero':
-            return np.nan_to_num(res, copy=True, nan=0.0)
-        elif nan == 'filter':
-            new_shape = list(res.shape)
-            new_shape[3] = -1
-            return np.reshape(res[np.logical_not(np.isnan(res))], tuple(new_shape))
-
-        return res
 
     def plot_metric_accros_problems(self, metric: str):
+        method_names = self._benchmark_data.common_methods()
+        method_names = [m for m in method_names if m not in self._ignore_lists['method']]
+        if metric in self._ignore_lists['metric']:
+            self._logger.warning(f"Ignoring metric {metric} because it is on the black list.")
+            return
         self._logger.info(f"Creating summary plot for metric {metric}")
         fig, axis = plt.subplots()
-        fig.set_size_inches(6, 6)
+        fig.set_size_inches(8, 6)
         reference_method = self._args.compare_to
-        method_indices = self.indices('method')
-        problem_indices = self.indices('problem')
-        raw_data = self.get_data_array([
-            problem_indices,
-            method_indices,
-            self.index('metric', metric),
-            None,
-            None,
-        ], nan='zero')
-        data_metric = np.sum(
-            np.reshape(
-                raw_data,
-                (len(problem_indices), len(method_indices), -1),
-            ),
-            axis = 2,
-        ).T
+        data, failures = self._benchmark_data.get_data_array(
+                problem_names = 'all',
+                method_names = method_names,
+                metric_names = [metric],
+                average = 'method',
+        )
         if reference_method is not None:
-            raw_data_reference = self.get_data_array([
-                problem_indices,
-                self.index('method', reference_method),
-                self.index('metric', metric),
-                None,
-                None,
-            ], nan='zero')
-            data_metric_reference = np.sum(
-                np.reshape(
-                    raw_data_reference,
-                    (len(problem_indices), 1, -1),
-                ),
-                axis=2,
-            ).T
-            relative_change = data_metric / data_metric_reference
+            raw_data_reference, _ = self._benchmark_data.get_data_array(
+                problem_names = 'all',
+                method_names = [reference_method],
+                metric_names = [metric],
+                average = 'method',
+            )
+            relative_change = np.array(data) / np.array(raw_data_reference)
             self.create_barplot(axis, relative_change, metric)
         else:
-            self.create_barplot(axis, data_metric, metric)
+            self.create_barplot(axis, np.array(data), metric, failures=failures)
         plt.subplots_adjust(wspace=0.05)
         fig.tight_layout()
         if self._args.output:
@@ -347,95 +414,110 @@ class BenchPlotter():
         if self._args.show:
             plt.show()
 
-    def create_barplot(self, axes: Axes, data: np.ndarray, metric: str):
-        problem_indices = self.indices('problem')
-        method_indices = self.indices('method')
-        methods_names = self.methods_names(method_indices)
-        x_positions = np.arange(0, len(problem_indices))
-        width = 0.9/self.nb_methods
+    def create_barplot(self, axes: Axes, data: np.ndarray, metric: str, failures: Optional[List[int]] = None):
+        problem_names = self._benchmark_data.common_problems()
+        method_names = self._benchmark_data.common_methods()
+        method_names = [m for m in method_names if m not in self._ignore_lists['method']]
+        x_positions = np.arange(0, len(problem_names))
+        method_indices = list(range(0, len(method_names)))
+        width = 0.9/len(method_names)
         for method_i, method_index in enumerate(method_indices):
             method_i_positions = x_positions + method_i * width
-            axes.bar(method_i_positions, data[method_i, :], width, label=f"{methods_names[method_i]}")
+            axes.bar(method_i_positions, data[:, method_i], width, label=f"{method_names[method_i]}")
+            if failures:
+                for j, pos in enumerate(method_i_positions):
+                    if failures[j][method_i] > 0:
+                        axes.text(
+                            pos,
+                            data[j, method_i],
+                            f"{failures[j][method_i]}",
+                            horizontalalignment='center',
+                            verticalalignment='bottom',
+                            fontsize=10,
+                            color=get_color('latte', 'red'),
+                        )
         axes.set_ylabel(f'{metric}')
-        axes.set_title(f'{metric} by problem and method')
+        axes.text(
+            0.02,
+            0.98,
+            f"Failures",
+            horizontalalignment='left',
+            verticalalignment='top',
+            fontsize=10,
+            color=get_color('latte', 'red'),
+            transform=axes.transAxes,
+        )
         axes.set_xticks(x_positions + (len(method_indices) - 1) / 2 * width)
-        problem_names = [self._problems[i] for i in problem_indices]
         axes.set_xticklabels(problem_names, rotation=45, fontsize=16, ha="right")
-        axes.legend(loc = 'lower left')
+        axes.legend(loc = 'lower left', fontsize=14, bbox_to_anchor=(0.0, 1.02), ncol=3)
         max_value = np.max(data)
         max_value = 1.50
         min_value = np.min(data)
         min_value = 0.1
         offset = 1/100 * (max_value - min_value)
-        axes.set_ylim([min_value-offset, max_value+offset])
+        #axes.set_ylim([min_value-offset, max_value+offset])
 
 
 
         
         
 
-    def plot(self, problem: Optional[str] = None):
+    def plot(self, problem: str):
         self._logger.info(f"Plotting for problem {problem}")
-        fig, axs = plt.subplots(1, self.nb_metrics)
-        fig.set_size_inches((3 * self.nb_metrics, 6))
+        metric_names = self._benchmark_data.common_metrics(problem_names=[problem])
+        method_names = self._benchmark_data.common_methods(problem_names=[problem])
+        metric_names = [m for m in metric_names if m not in self._ignore_lists['metric']]
+        method_names = [m for m in method_names if m not in self._ignore_lists['method']]
+        fig, axs = plt.subplots(1, len(metric_names))
+        if len(metric_names) == 1:
+            axs = [axs]
+        fig.set_size_inches((3 * len(metric_names), 6))
         reference_method = self._args.compare_to
         max_value = 1.0
         min_value = 1e5
-        if problem is None:
-            problem = self._problems[0]
-        method_indices = self.indices('method')
-        for metric_i, metric in enumerate(self._metrics):
-            raw_data = self.get_data_array([
-                self.index('problem', problem),
-                method_indices,
-                self.index('metric', metric),
-                None,
-                None,
-            ], nan='filter')
-            data_metric = np.reshape(
-                raw_data,
-                (len(method_indices), -1),
-            ).T
+        for metric_i, metric in enumerate(metric_names):
+            raw_data, failures = self._benchmark_data.get_data_array(
+                problem_names = [problem],
+                method_names = method_names,
+                metric_names = [metric],
+            )
+            if len(method_names) > 1:
+                raw_data = raw_data[0]
+                failures = failures[0]
+            data = [np.array(d) for d in raw_data]
             if reference_method is not None and metric not in self._relative_black_list:
-                raw_data_reference = self.get_data_array([
-                    self.index('problem', problem),
-                    self.index('method', reference_method),
-                    self.index('metric', metric),
-                    None,
-                    None,
-                ], nan='filter')
-                data_metric_reference = np.reshape(
-                    raw_data_reference,
-                    (1, -1),
-                ).T
+                raw_data_reference, _ = self._benchmark_data.get_data_array(
+                    problem_names = [problem],
+                    method_names = [reference_method],
+                    metric_names = [metric],
+                )[0]
+                if len(method_names) > 1:
+                    raw_data_reference = raw_data_reference[0]
+                data_metric_reference = np.array(raw_data_reference)
                 if np.any(data_metric_reference == 0):
                     self._logger.error(
                         f"Zeros in reference method for metric {metric} in problem {problem}: Skipping plotting"
                     )
                     return
-                relative_change = data_metric / data_metric_reference
+                for i, d in enumerate(data):
+                    if d.shape != data_metric_reference.shape:
+                        self._logger.error(
+                            f"Data shape mismatch for method {method_names[i]} in problem {problem}"
+                        )
+                        return
+                relative_change =  data / data_metric_reference
+                relative_change = [d.tolist() for d in relative_change]
                 self.create_statistics_plot(axs[metric_i], relative_change)
-                axs[metric_i].plot([0.5, len(method_indices)+0.5], [1.05, 1.05], 'r.-.')
-                axs[metric_i].plot([0.5, len(method_indices)+0.5], [0.95, 0.95], 'g.-.')
-                axs[metric_i].set_xlim([0.5, 0.5 + len(method_indices)])
-                axs[metric_i].set_xticks([])
-                max_value = max(max_value, np.max(relative_change))
-                min_value = min(min_value, np.min(relative_change))
             else:
-                self.create_statistics_plot(axs[metric_i], data_metric)
+                if metric == 'success':
+                    self.create_success_plot(axs[metric_i], data)
+                else:
+                    self.create_statistics_plot(axs[metric_i], data)
 
 
-            method_names = self.methods_names(method_indices)
             axs[metric_i].set_xticks(list(range(1, len(method_names)+1)), method_names, fontsize=18, rotation=90)
             axs[metric_i].set_title(f"{metric}")
         fig.suptitle(f"{problem}")
-        if reference_method:
-            for metric_i, metric in enumerate(self._metrics):
-                if metric in self._relative_black_list:
-                    continue
-                axs[metric_i].set_ylim([min_value - 0.01, max_value + 0.01])
-                if metric_i > 0:
-                    axs[metric_i].set_yticklabels([])
         plt.subplots_adjust(wspace=0.05)
         if self._args.with_image:
             self.insert_png(axs[0], problem, (1.0, max_value-1), 0.14)

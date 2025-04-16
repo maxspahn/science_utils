@@ -13,6 +13,7 @@ license = {text = "MIT"}
 [project.scripts]
 process_json = "science_utils.postprocess.process_json:main"
 process_csv_series = "science_utils.visualize.csv_timeseries:main"
+plot_csv = "science_utils.visualize.plot_csv:main"
 
 [build-system]
 requires = ["pdm-backend"]
